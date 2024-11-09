@@ -64,9 +64,9 @@ CLI Commands
 python main.py status
 
 ```
-
+## Branch Management
 ```bash
-# Branch Management
+
 python main.py create_branch        # Create Branch
 ```
 ```bash
@@ -78,8 +78,9 @@ python main.py delete_branch        # Delete Branch
 ``` bash
 python main.py list_branches        # List Branches
 ```
+##  Table Management
 ```bash
-# Table Management
+
 python main.py create_table         # Create Table
 ```
 ```bash
@@ -91,9 +92,8 @@ python main.py describe_table       # Describe Table
 ``` bash
 python main.py drop_table           # Drop Table
 ```
-
+## Migration Management
 ```bash
-# Migration Management
 python main.py create_migration     # Create Migration
 ```
 ```bash
