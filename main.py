@@ -31,7 +31,8 @@ class DatabaseManager:
                     'password': 'B#@w@+123',
                     'host': 'localhost',
                     'port': 3306,
-                    'database': 'mydb'
+                    'database': 'mydb',
+                    'auth_plugin': 'mysql_native_password'  # Add this line
                 }
             }
             with open(self.config_path, 'w') as f:
@@ -39,7 +40,13 @@ class DatabaseManager:
             return default_config
         
         with open(self.config_path, 'r') as f:
-            return json.load(f)
+            config = json.load(f)
+            # Ensure auth_plugin is set in existing configs
+            if 'auth_plugin' not in config['connection']:
+                config['connection']['auth_plugin'] = 'mysql_native_password'
+                with open(self.config_path, 'w') as f:
+                    json.dump(config, f, indent=4)
+            return config
 
     def _save_config(self):
         """Save current configuration to JSON file"""

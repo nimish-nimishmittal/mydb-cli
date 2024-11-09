@@ -1,0 +1,31 @@
+up - 0
+CREATE TABLE testhtf (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+down - 0
+DROP TABLE IF EXISTS testhtf;
+
+up - 1
+INSERT INTO users (first_name, last_name, email, password)
+VALUES
+('John', 'Doe', 'john.doe@example.com', 'password123'),
+('Jane', 'Smith', 'jane.smith@example.com', 'password456'),
+('Robert', 'Brown', 'robert.brown@example.com', 'password789'),
+('Emily', 'Davis', 'emily.davis@example.com', 'password101'),
+('Michael', 'Johnson', 'michael.johnson@example.com', 'password202');
+
+down - 1
+DELETE FROM users
+WHERE email IN (
+    'john.doe@example.com',
+    'jane.smith@example.com',
+    'robert.brown@example.com',
+    'emily.davis@example.com',
+    'michael.johnson@example.com'
+);
