@@ -6,6 +6,9 @@ import plotly.graph_objects as go
 from datetime import datetime
 import json
 import os
+from google.generativeai import GenerativeModel
+import google.generativeai as genai
+from typing import List, Dict
 
 def init_session_state():
     if 'db_manager' not in st.session_state:
@@ -20,7 +23,7 @@ def init_session_state():
 
 def render_sidebar():
     st.sidebar.title("MyDB Studio")
-    pages = ['Overview', 'Branches', 'Tables', 'Migrations']
+    pages = ['Overview', 'Branches', 'Tables', 'Migrations', 'Ask Gemini']
     st.session_state.current_page = st.sidebar.radio("Navigation", pages)
     
     # Always show current branch status
@@ -305,6 +308,242 @@ def render_migrations_page():
     except Exception as e:
         st.error(f"Error getting migration status: {str(e)}")
 
+def setup_genai(api_key: str) -> None:
+    """Initialize the Gemini API with the provided key."""
+    genai.configure(api_key=api_key)
+
+def debug_print(message: str):
+    """Helper function to print debug messages to Streamlit."""
+    st.sidebar.markdown(f"**Debug:** {message}")
+
+def get_table_schema() -> Dict[str, List[str]]:
+    """Get schema information for all tables in current database."""
+    if not st.session_state.db_manager.connect():
+        return {}
+    
+    connection = st.session_state.db_manager.connection
+    cursor = connection.cursor()
+    
+    # Get current database name
+    current_branch = st.session_state.db_manager.config['current_branch']
+    db_name = st.session_state.db_manager.config['connection']['database']
+    if current_branch != 'main':
+        db_name = f"{db_name}_{current_branch}"
+    
+    schemas = {}
+    try:
+        # Switch to the correct database
+        cursor.execute(f"USE `{db_name}`")
+        
+        # Get list of tables
+        cursor.execute("SHOW TABLES")
+        tables_raw = cursor.fetchall()
+        
+        # Debug table names
+        debug_print(f"Raw tables: {tables_raw}")
+        
+        # Extract table names
+        tables = []
+        for table_row in tables_raw:
+            table_name = table_row[0]
+            if isinstance(table_name, bytes):
+                table_name = table_name.decode('utf-8')
+            elif isinstance(table_name, bytearray):
+                table_name = table_name.decode('utf-8')
+            tables.append(table_name)
+        
+        # Debug processed table names
+        debug_print(f"Processed tables: {tables}")
+        
+        for table in tables:
+            try:
+                cursor.execute(f"DESCRIBE `{table}`")
+                columns = cursor.fetchall()
+                schemas[table] = [f"{col[0]} ({col[1]})" for col in columns]
+            except Exception as e:
+                debug_print(f"Error describing table {table}: {str(e)}")
+        
+    except Exception as e:
+        st.error(f"Error fetching schema: {str(e)}")
+        return {}
+    finally:
+        cursor.close()
+    
+    return schemas
+
+def auto_analyze_tables() -> None:
+    """Automated analysis of database tables."""
+    schemas = get_table_schema()
+    if not schemas:
+        st.error("No tables found or couldn't access database")
+        return
+    
+    st.write("📊 **Automated Table Analysis**")
+    
+    for table, columns in schemas.items():
+        with st.expander(f"Analysis for {table}"):
+            cursor = st.session_state.db_manager.connection.cursor()
+            
+            try:
+                # Get row count
+                cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
+                row_count = cursor.fetchone()[0]
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.metric("Total Rows", row_count)
+                    st.write("**Columns:**")
+                    for col in columns:
+                        st.write(f"- {col}")
+                
+                with col2:
+                    # Try to get statistics for numeric columns
+                    try:
+                        cursor.execute(f"""
+                            SELECT 
+                                COLUMN_NAME, 
+                                DATA_TYPE 
+                            FROM INFORMATION_SCHEMA.COLUMNS 
+                            WHERE TABLE_SCHEMA = %s 
+                            AND TABLE_NAME = %s 
+                            AND DATA_TYPE IN ('int', 'decimal', 'float', 'double')
+                        """, (st.session_state.db_manager.config['connection']['database'], table))
+                        
+                        numeric_cols = cursor.fetchall()
+                        
+                        if numeric_cols:
+                            st.write("**Numeric Column Statistics:**")
+                            for col in numeric_cols:
+                                col_name = col[0]
+                                try:
+                                    cursor.execute(f"""
+                                        SELECT 
+                                            MIN(`{col_name}`) as min_val,
+                                            MAX(`{col_name}`) as max_val,
+                                            AVG(`{col_name}`) as avg_val
+                                        FROM `{table}`
+                                    """)
+                                    stats = cursor.fetchone()
+                                    if stats:
+                                        st.write(f"*{col_name}*")
+                                        st.write(f"- Min: {stats[0]}")
+                                        st.write(f"- Max: {stats[1]}")
+                                        st.write(f"- Avg: {round(float(stats[2]), 2) if stats[2] is not None else 'N/A'}")
+                                except Exception as e:
+                                    st.warning(f"Could not calculate statistics for {col_name}: {str(e)}")
+                                    
+                    except Exception as e:
+                        st.warning(f"Could not fetch numeric columns: {str(e)}")
+                
+            except Exception as e:
+                st.error(f"Error analyzing table {table}: {str(e)}")
+            finally:
+                cursor.close()
+
+def sql_chat_assistant(user_input: str, schema_context: str) -> str:
+    """Generate SQL queries based on user input using Gemini."""
+    model = GenerativeModel('gemini-pro')
+    prompt = f"""
+    As a SQL expert, help me write a SQL query based on the following schema:
+    {schema_context}
+    
+    User request: {user_input}
+    
+    Provide only the SQL query without any explanation. The query should be correct, efficient, and follow best practices.
+    Ensure to wrap table and column names in backticks to handle special characters.
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"Error generating SQL: {str(e)}"
+
+def render_ask_gemini_page():
+    st.title("Ask Gemini 🤖")
+    
+    # Debug mode toggle
+    debug_mode = st.sidebar.checkbox("Debug Mode", value=False)
+    
+    # Check for API key
+    api_key = st.sidebar.text_input("Enter Gemini API Key", type="password")
+    if not api_key:
+        st.warning("Please enter your Gemini API key in the sidebar to continue")
+        return
+    
+    setup_genai(api_key)
+    
+    # Tab selection
+    tab1, tab2 = st.tabs(["🔍 Auto Analyze", "💬 SQL Assistant"])
+    
+    with tab1:
+        st.header("Automated Database Analysis")
+        if st.button("Run Analysis"):
+            with st.spinner("Analyzing database..."):
+                auto_analyze_tables()
+    
+    with tab2:
+        st.header("SQL Query Assistant")
+        
+        # Get and display schema context
+        with st.spinner("Loading database schema..."):
+            schemas = get_table_schema()
+            
+        if schemas:
+            schema_context = "Available tables and their columns:\n"
+            for table, columns in schemas.items():
+                schema_context += f"\n{table}:\n"
+                for col in columns:
+                    schema_context += f"- {col}\n"
+            
+            if debug_mode:
+                st.sidebar.markdown("### Schema Context")
+                st.sidebar.code(schema_context)
+            
+            # Chat interface
+            if "messages" not in st.session_state:
+                st.session_state.messages = []
+
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+            if prompt := st.chat_input("Describe the SQL query you need..."):
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+
+                with st.chat_message("assistant"):
+                    with st.spinner("Generating SQL query..."):
+                        response = sql_chat_assistant(prompt, schema_context)
+                    st.code(response, language="sql")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Execute Query"):
+                            cursor = None
+                            try:
+                                cursor = st.session_state.db_manager.connection.cursor()
+                                cursor.execute(response)
+                                results = cursor.fetchall()
+                                if results:
+                                    # Get column names from cursor description
+                                    columns = [desc[0] for desc in cursor.description]
+                                    df = pd.DataFrame(results, columns=columns)
+                                    st.dataframe(df)
+                                else:
+                                    st.info("Query executed successfully but returned no results")
+                            except Exception as e:
+                                st.error(f"Error executing query: {str(e)}")
+                            finally:
+                                if cursor:
+                                    cursor.close()
+                
+                st.session_state.messages.append({"role": "assistant", "content": f"```sql\n{response}\n```"})
+        else:
+            st.error("Unable to fetch database schema. Please check your connection.")
+
 def main():
     st.set_page_config(
         page_title="MyDB Studio",
@@ -323,6 +562,8 @@ def main():
         render_tables_page()
     elif st.session_state.current_page == 'Migrations':
         render_migrations_page()
+    elif st.session_state.current_page == 'Ask Gemini':
+        render_ask_gemini_page()
 
 if __name__ == "__main__":
     main()

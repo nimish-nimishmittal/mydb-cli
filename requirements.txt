@@ -9,3 +9,5 @@ tabulate
 streamlit
 pandas
 plotly
+networkx
+google-generativeai
