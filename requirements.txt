@@ -1,0 +1,11 @@
+click
+mysql.connector
+json
+os
+datetime
+shutil
+typing
+tabulate
+streamlit
+pandas
+plotly
