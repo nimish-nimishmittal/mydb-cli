@@ -1,0 +1,9 @@
+{
+    "migration_number": 0,
+    "name": "add_userdata",
+    "description": "add user data",
+    "branch": "htf02",
+    "created_at": "20241109195708",
+    "parent_branch": "main",
+    "parent_migration_number": 0
+}

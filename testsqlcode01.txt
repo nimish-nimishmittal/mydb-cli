@@ -1,0 +1,18 @@
+up - 0 
+CREATE TABLE user_data (
+    user_id INT PRIMARY KEY AUTO_INCREMENT,
+    username VARCHAR(50) NOT NULL,
+    email VARCHAR(100),
+    password VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+down - 0
+DROP TABLE IF EXISTS user_data;
+
+up - 1
+INSERT INTO user_data (username, email, password) 
+VALUES ('johndoe', 'johndoe@example.com', 'password123');
+
+down - 1
+DELETE FROM user_data WHERE username = 'johndoe' AND email = 'johndoe@example.com';
