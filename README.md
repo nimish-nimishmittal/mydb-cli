@@ -65,27 +65,25 @@ python main.py status
 
 ```
 
-- Branch Management
+```bash
+# Branch Management
+python main.py create_branch        # Create Branch
+python main.py switch_branch        # Switch Branch
+python main.py delete_branch        # Delete Branch
+python main.py list_branches        # List Branches
 
-  - Create Branch: python main.py create_branch
-  - Switch Branch: python main.py switch_branch
-  - Delete Branch: python main.py delete_branch
-  - List Branches: python main.py list_branches
+# Table Management
+python main.py create_table         # Create Table
+python main.py list_tables          # List Tables
+python main.py describe_table       # Describe Table
+python main.py drop_table           # Drop Table
 
-- Table Management
-
-  - Create Table: python main.py create_table
-  - List Tables: python main.py list_tables
-  - Describe Table: python main.py describe_table
-  - Drop Table: python main.py drop_table
-
-- Migration Management
-
-- Create Migration: python main.py create_migration
-- Apply Migration: python main.py apply_migration
-- Rollback Migration: python main.py migrate_down
-- View Migration Status: python main.py migration_status
-- Merge Branch: python main.py merge_branch
+# Migration Management
+python main.py create_migration     # Create Migration
+python main.py apply_migration      # Apply Migration
+python main.py migrate_down         # Rollback Migration
+python main.py migration_status     # View Migration Status
+python main.py merge_branch         # Merge Branch
 
 # Launch MyDB Studio GUI
 
