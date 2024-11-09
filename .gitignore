@@ -2,3 +2,4 @@ venv
 .mydb
 __pycache__
 migrations/*
+!migrations/.gitkeep
