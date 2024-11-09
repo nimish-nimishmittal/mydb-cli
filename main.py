@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import click
 import mysql.connector
 from mysql.connector import Error
