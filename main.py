@@ -8,12 +8,14 @@ from datetime import datetime
 import shutil
 from typing import List
 from tabulate import tabulate
+from history_manager import HistoryManager
 
 class DatabaseManager:
     def __init__(self, config_path='.mydb/config.json'):
         self.config_path = config_path
         self.config = self._load_config()
         self.connection = None
+        self.history_manager = HistoryManager()
     
     def _load_config(self):
         """Load configuration from JSON file"""
@@ -66,6 +68,11 @@ class DatabaseManager:
     def create_branch(self, branch_name):
         """Create a new branch from current branch"""
         if branch_name in self.config['branches']:
+            self.history_manager.add_entry(
+                command='create_branch',
+                details=f"Failed to create branch '{branch_name}' - branch already exists",
+                status='failed'
+            )   
             click.echo(f"Branch '{branch_name}' already exists!")
             return False
 
@@ -75,8 +82,6 @@ class DatabaseManager:
                 return False
 
             cursor = self.connection.cursor()
-        
-            # Get current branch name
             current_branch = self.config['current_branch']
         
             # Create new database for branch
@@ -110,9 +115,22 @@ class DatabaseManager:
             click.echo(f"Initialized schema_migrations table in branch '{branch_name}'")
         
             click.echo(f"Successfully created branch '{branch_name}' from '{current_branch}'")
+        
+            # Record successful branch creation
+            self.history_manager.add_entry(
+                command='create_branch',
+                details=f"Successfully created branch '{branch_name}' from '{current_branch}'",
+                status='success'
+            )
             return True
 
         except Error as e:
+            # Record failed branch creation
+            self.history_manager.add_entry(
+                command='create_branch',
+                details=f"Failed to create branch '{branch_name}' - {str(e)}",
+                status='failed'
+            )
             click.echo(f"Error creating branch: {e}")
             return False
         finally:
@@ -229,26 +247,34 @@ class DatabaseManager:
 
             cursor = self.connection.cursor()
             current_branch = self.config['current_branch']
-            
+        
             if current_branch == 'main':
                 current_db = self.config['connection']['database']  # Use 'mydb'
             else:
                 current_db = f"{self.config['connection']['database']}_{current_branch}"  # e.g., 'mydb_nimish'
-            
+        
             cursor.execute(f"USE {current_db}")
             cursor.execute("SHOW TABLES")
             tables = cursor.fetchall()
-        
+    
             if not tables:
                 click.echo(f"No tables found in branch '{current_branch}'")
                 return True
 
             # Get table information
             table_info = []
-            for (table_name,) in tables:
-                cursor.execute(f"SHOW CREATE TABLE {table_name}")
+            for table_row in tables:
+                # Convert byte string to regular string if necessary
+                table_name = table_row[0]
+                if isinstance(table_name, bytes):
+                    table_name = table_name.decode('utf-8')
+                elif isinstance(table_name, bytearray):
+                    table_name = table_name.decode('utf-8')
+            
+                # Use proper quoting for table names
+                cursor.execute(f"SHOW CREATE TABLE `{table_name}`")
                 create_stmt = cursor.fetchone()[1]
-                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                cursor.execute(f"SELECT COUNT(*) FROM `{table_name}`")
                 row_count = cursor.fetchone()[0]
                 table_info.append([table_name, row_count])
 
@@ -943,20 +969,20 @@ class DatabaseManager:
                 target_db = f"{target_db}_{target_branch}"
 
             # Switch to source database
-            cursor.execute(f"USE {source_db}")
+            cursor.execute(f"USE `{source_db}`")
 
             # Get all tables from the source branch
             cursor.execute("SHOW TABLES")
-            tables = [table[0] for table in cursor.fetchall()]
-
+            tables = [table[0].decode('utf-8') if isinstance(table[0], bytearray) else table[0] for table in cursor.fetchall()]
+        
             if not tables:
                 click.echo(f"No tables found in source branch '{source_branch}' to merge.")
                 return True
 
-            click.echo(f"Found {len(tables)} tables to merge.")
+            click.echo(f"Found {len(tables)} tables to merge: {tables}")
 
             # Switch to target database
-            cursor.execute(f"USE {target_db}")
+            cursor.execute(f"USE `{target_db}`")
 
             # Start merging tables
             for table in tables:
@@ -966,20 +992,34 @@ class DatabaseManager:
                 cursor.execute(f"SHOW TABLES LIKE '{table}'")
                 if not cursor.fetchone():
                     # Table does not exist in target, copy schema from source
-                    cursor.execute(f"CREATE TABLE {target_db}.{table} LIKE {source_db}.{table}")
+                    cursor.execute(f"CREATE TABLE `{target_db}`.`{table}` LIKE `{source_db}`.`{table}`")
+                else:
+                    # Align schemas: Add missing columns in the target table
+                    cursor.execute(f"SHOW COLUMNS FROM `{source_db}`.`{table}`")
+                    source_columns = {col[0]: col[1].decode('utf-8') if isinstance(col[1], bytearray) else col[1] for col in cursor.fetchall()}
+                    cursor.execute(f"SHOW COLUMNS FROM `{target_db}`.`{table}`")
+                    target_columns = {col[0]: col[1].decode('utf-8') if isinstance(col[1], bytearray) else col[1] for col in cursor.fetchall()}
 
-                # Copy data using INSERT ... ON DUPLICATE KEY UPDATE for merging
-                columns_query = f"SHOW COLUMNS FROM {source_db}.{table}"
-                cursor.execute(columns_query)
+                    for col_name, col_type in source_columns.items():
+                        if col_name not in target_columns:
+                            click.echo(f"Adding missing column '{col_name}' to '{table}' in target branch.")
+                            cursor.execute(f"ALTER TABLE `{target_db}`.`{table}` ADD COLUMN `{col_name}` {col_type}")
+
+                    # Re-fetch columns to ensure consistency
+                    cursor.execute(f"SHOW COLUMNS FROM `{target_db}`.`{table}`")
+
+                # Fetch column names for the table
+                cursor.execute(f"SHOW COLUMNS FROM `{source_db}`.`{table}`")
                 columns = [col[0] for col in cursor.fetchall()]
-                columns_str = ", ".join(columns)
+                columns_str = ", ".join([f"`{col}`" for col in columns])
 
                 # Construct ON DUPLICATE KEY UPDATE part
-                update_str = ", ".join([f"{col}=VALUES({col})" for col in columns])
+                update_str = ", ".join([f"`{col}`=VALUES(`{col}`)" for col in columns])
 
+                # Merge data from source to target
                 merge_query = f"""
-                    INSERT INTO {target_db}.{table} ({columns_str})
-                    SELECT {columns_str} FROM {source_db}.{table}
+                    INSERT INTO `{target_db}`.`{table}` ({columns_str})
+                    SELECT {columns_str} FROM `{source_db}`.`{table}`
                     ON DUPLICATE KEY UPDATE {update_str}
                 """
                 cursor.execute(merge_query)
@@ -1148,6 +1188,21 @@ def studio():
         os.system(f"streamlit run studio.py")
     except ImportError:
         click.echo("Streamlit is required to run the studio. Install it with: pip install streamlit")
+
+@cli.command()
+@click.option('--limit', type=int, help='Limit the number of entries to show')
+def history(limit):
+    """Show command history with details."""
+    db_manager = DatabaseManager()
+    history_entries = db_manager.history_manager.get_history(limit)
+    
+    if not history_entries:
+        click.echo("No history entries found.")
+        return
+
+    headers = ['Timestamp', 'Status', 'Command', 'Details', 'Error']
+    click.echo("\nCommand History:")
+    click.echo(tabulate(history_entries, headers=headers, tablefmt='grid'))
 
 if __name__ == '__main__':
     cli()

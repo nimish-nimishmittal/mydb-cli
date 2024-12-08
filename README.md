@@ -3,8 +3,8 @@
 MyDB is a powerful database management tool that provides Git-like branching functionality for MySQL databases. It allows developers to create isolated database environments, manage migrations, and merge changes between branches.
 
 📚 Related Documentation:
-- [MyDB Landing Page](../README.md)
-- [MyDB Studio Documentation](studio/README.md)
+- [MyDB Landing Page](landingREADME.md)
+- [MyDB Studio Documentation](studioREADME.md)
 
 ## Table of Contents
 - [Features](#features)
