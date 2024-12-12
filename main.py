@@ -10,12 +10,83 @@ from typing import List
 from tabulate import tabulate
 from history_manager import HistoryManager
 
+class MigrationManager:
+    def __init__(self, config_path='.mydb/migrations.json'):
+        self.config_path = config_path
+        self.migrations = self._load_migrations()
+
+    def _load_migrations(self):
+        if not os.path.exists(self.config_path):
+            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+            return {}
+        with open(self.config_path, 'r') as f:
+            return json.load(f)
+
+    def _save_migrations(self):
+        with open(self.config_path, 'w') as f:
+            json.dump(self.migrations, f, indent=4)
+
+    def create_migration(self, name, description, branch):
+        migration_number = self._get_next_migration_number(branch)
+        timestamp = datetime.now().isoformat()
+        
+        migration = {
+            "number": migration_number,
+            "name": name,
+            "description": description,
+            "branch": branch,
+            "status": "pending",
+            "created_at": timestamp,
+            "applied_at": None
+        }
+
+        if branch not in self.migrations:
+            self.migrations[branch] = []
+        self.migrations[branch].append(migration)
+        self._save_migrations()
+
+        return migration_number
+
+    def _get_next_migration_number(self, branch):
+        if branch not in self.migrations or not self.migrations[branch]:
+            return 1
+        return max(m["number"] for m in self.migrations[branch]) + 1
+
+    def apply_migration(self, migration_number, branch):
+        for migration in self.migrations.get(branch, []):
+            if migration["number"] == migration_number:
+                migration["status"] = "applied"
+                migration["applied_at"] = datetime.now().isoformat()
+                self._save_migrations()
+                return True
+        return False
+
+    def rollback_migration(self, migration_number, branch):
+        for migration in self.migrations.get(branch, []):
+            if migration["number"] == migration_number:
+                migration["status"] = "rolled_back"
+                migration["applied_at"] = None
+                self._save_migrations()
+                return True
+        return False
+
+    def get_migration_status(self, branch):
+        return self.migrations.get(branch, [])
+
+    def get_current_migration(self, branch):
+        applied_migrations = [m for m in self.migrations.get(branch, []) if m["status"] == "applied"]
+        if not applied_migrations:
+            return -1
+        return max(m["number"] for m in applied_migrations)
+
+
 class DatabaseManager:
     def __init__(self, config_path='.mydb/config.json'):
         self.config_path = config_path
         self.config = self._load_config()
         self.connection = None
         self.history_manager = HistoryManager()
+        self.migration_manager = MigrationManager()
     
     def _load_config(self):
         """Load configuration from JSON file"""
@@ -67,12 +138,13 @@ class DatabaseManager:
 
     def create_branch(self, branch_name):
         """Create a new branch from current branch"""
+        # add history code snippet 1 
         if branch_name in self.config['branches']:
             self.history_manager.add_entry(
                 command='create_branch',
                 details=f"Failed to create branch '{branch_name}' - branch already exists",
                 status='failed'
-            )   
+            )
             click.echo(f"Branch '{branch_name}' already exists!")
             return False
 
@@ -111,12 +183,13 @@ class DatabaseManager:
             }
             self._save_config()
 
-            self.create_schema_migrations_table(branch_name)
-            click.echo(f"Initialized schema_migrations table in branch '{branch_name}'")
+            # self.create_schema_migrations_table(branch_name)
+            # click.echo(f"Initialized schema_migrations table in branch '{branch_name}'")
         
             click.echo(f"Successfully created branch '{branch_name}' from '{current_branch}'")
         
             # Record successful branch creation
+            # add history code snippet 2
             self.history_manager.add_entry(
                 command='create_branch',
                 details=f"Successfully created branch '{branch_name}' from '{current_branch}'",
@@ -126,6 +199,7 @@ class DatabaseManager:
 
         except Error as e:
             # Record failed branch creation
+            # add history code snippet 3
             self.history_manager.add_entry(
                 command='create_branch',
                 details=f"Failed to create branch '{branch_name}' - {str(e)}",
@@ -141,6 +215,11 @@ class DatabaseManager:
     def switch_branch(self, branch_name):
         """Switch to a different branch"""
         if branch_name not in self.config['branches']:
+            self.history_manager.add_entry(
+                command='switch_branch',
+                details=f"Failed to switch branch '{branch_name}' - branch does not exist",
+                status='failed'
+            )
             click.echo(f"Branch '{branch_name}' does not exist!")
             return False
 
@@ -151,9 +230,19 @@ class DatabaseManager:
             self._save_config()
             
             click.echo(f"Switched to branch '{branch_name}'")
+            self.history_manager.add_entry(
+                command='switch_branch',
+                details=f"Successfully switched to branch '{branch_name}'",
+                status='success'
+            )
             return True
 
         except Exception as e:
+            self.history_manager.add_entry(
+                command='switch_branch',
+                details=f"Failed to switch branch '{branch_name}' - {str(e)}",
+                status='failed'
+            )
             click.echo(f"Error switching branch: {e}")
             return False
 
@@ -449,7 +538,7 @@ class DatabaseManager:
         try:
             branch = self.config['current_branch']
             migration_number = self.get_next_migration_number(branch)
-        
+    
             if migration_number is None:
                 return False
 
@@ -460,68 +549,48 @@ class DatabaseManager:
 
             # Create migration files
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        
-            # Create up.sql with header
-            with open(f"{migration_dir}/up.sql", "w") as f:
-                f.write(f"-- Migration: {name}\n")
-                f.write(f"-- Created at: {timestamp}\n")
-                f.write(f"-- Branch: {branch}\n")
-                f.write("-- Up Migration\n\n")
-
-            # Create down.sql with header
-            with open(f"{migration_dir}/down.sql", "w") as f:
-                f.write(f"-- Migration: {name}\n")
-                f.write(f"-- Created at: {timestamp}\n")
-                f.write(f"-- Branch: {branch}\n")
-                f.write("-- Down Migration\n\n")
+    
+            # Create up.sql and down.sql files
+            for file_name in ['up.sql', 'down.sql']:
+                with open(f"{migration_dir}/{file_name}", "w") as f:
+                    f.write(f"-- Migration: {name}\n")
+                    f.write(f"-- Created at: {datetime.now().isoformat()}\n")
+                    f.write(f"-- Branch: {branch}\n")
+                    f.write(f"-- {file_name.split('.')[0].capitalize()} Migration\n\n")
 
             # Get parent branch information
             parent_branch = self.config['branches'][branch].get('created_from')
             parent_migration_number = self._get_parent_branch_migration_number(branch)
 
-            # Create metadata.json
-            metadata = {
+            # Create metadata for JSON
+            migration_data = {
                 "migration_number": migration_number,
                 "name": name,
                 "description": description,
                 "branch": branch,
                 "created_at": timestamp,
                 "parent_branch": parent_branch,
-                "parent_migration_number": parent_migration_number
+                "parent_migration_number": parent_migration_number,
+                "status": "pending",
+                "applied_at": None
             }
-        
+
+            # Save metadata to JSON file
+            if branch not in self.migration_manager.migrations:
+                self.migration_manager.migrations[branch] = []
+            self.migration_manager.migrations[branch].append(migration_data)
+            self.migration_manager._save_migrations()
+
+            # Create metadata.json in migration directory (for backwards compatibility)
             with open(f"{migration_dir}/metadata.json", "w") as f:
-                json.dump(metadata, f, indent=4)
+                json.dump(migration_data, f, indent=4)
 
-            # Insert migration record into schema_migrations table
-            if not self.connect():
-                return False
-
-            cursor = self.connection.cursor()
-            db_name = self.config['connection']['database']
-            if branch != 'main':
-                db_name = f"{db_name}_{branch}"
-            cursor.execute(f"USE {db_name}")
-
-            # Insert migration record with branch information
-            cursor.execute("""
-            INSERT INTO schema_migrations (
-                migration_number, migration_name, branch_name, 
-                parent_branch, parent_migration_number, status, applied_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (migration_number, name, branch, parent_branch, parent_migration_number, 'pending', None))
-
-            self.connection.commit()
             click.echo(f"Created migration {migration_number:04d}_{name} in branch '{branch}'")
             return True
 
         except Exception as e:
             click.echo(f"Error creating migration: {e}")
             return False
-        finally:
-            if self.connection and self.connection.is_connected():
-                cursor.close()
-                self.connection.close()
 
     def apply_migration(self, migration_number=None, branch_name=None):
         try:
@@ -547,19 +616,15 @@ class DatabaseManager:
 
             # Fetch the next pending migration if not specified
             if migration_number is None:
-                cursor.execute("""
-                    SELECT migration_number, migration_name
-                    FROM schema_migrations
-                    WHERE branch_name = %s AND status = 'pending'
-                    ORDER BY migration_number ASC LIMIT 1
-                """, (branch,))
-                result = cursor.fetchone()
-
-                if not result:
+                pending_migrations = [m for m in self.migration_manager.migrations.get(branch, [])
+                                    if m['status'] == 'pending']
+                if not pending_migrations:
                     click.echo(f"No pending migrations for branch '{branch}'")
                     return True
 
-                migration_number, migration_name = result
+                migration = pending_migrations[0]
+                migration_number = migration['migration_number']
+                migration_name = migration['name']
                 click.echo(f"Applying migration {migration_number:04d}_{migration_name}")
 
             # Load migration files
@@ -569,6 +634,8 @@ class DatabaseManager:
 
             cursor.execute("START TRANSACTION")
 
+            executed_queries = []
+            
             # Apply up migration
             with open(migration_files['up'], 'r') as f:
                 sql = f.read()
@@ -576,27 +643,33 @@ class DatabaseManager:
                     for statement in sql.split(';'):
                         if statement.strip():
                             cursor.execute(statement)
+                            executed_queries.append(statement.strip())
 
-            # Update migration status
-            cursor.execute("""
-                UPDATE schema_migrations
-                SET status = 'applied', applied_at = CURRENT_TIMESTAMP
-                WHERE migration_number = %s AND branch_name = %s
-            """, (migration_number, branch))
+            # Update migration status in JSON
+            for migration in self.migration_manager.migrations.get(branch, []):
+                if migration['migration_number'] == migration_number:
+                    migration['status'] = 'applied'
+                    migration['applied_at'] = datetime.now().isoformat()
+                    break
+
+            self.migration_manager._save_migrations()
 
             cursor.execute("COMMIT")
             click.echo(f"Successfully applied migration {migration_number:04d} in branch '{branch}'")
-            return True
+            return True, executed_queries
 
         except Error as e:
             cursor.execute("ROLLBACK")
-            cursor.execute("""
-                UPDATE schema_migrations
-                SET status = 'failed', error_message = %s
-                WHERE migration_number = %s AND branch_name = %s
-            """, (str(e), migration_number, branch))
+            # Update migration status to failed in JSON
+            for migration in self.migration_manager.migrations.get(branch, []):
+                if migration['migration_number'] == migration_number:
+                    migration['status'] = 'failed'
+                    migration['error_message'] = str(e)
+                    break
+
+            self.migration_manager._save_migrations()
             click.echo(f"Error applying migration {migration_number:04d}: {e}")
-            return False
+            return False, []
 
         finally:
             if cursor:
@@ -628,159 +701,67 @@ class DatabaseManager:
 
     def migration_status(self, branch_name=None):
         """Get detailed migration status for a branch."""
-        try:
-            if not self.connect():
-                return False
+        branch = branch_name or self.config['current_branch']
+        migrations = self.migration_manager.migrations.get(branch, [])
 
-            cursor = self.connection.cursor()
-            branch = branch_name or self.config['current_branch']
-            
-            # Use branch-specific database
-            db_name = self.config['connection']['database']
-            if branch != 'main':
-                db_name = f"{db_name}_{branch}"
-            
-            cursor.execute(f"USE {db_name}")
-
-            # Get all migrations for this branch
-            cursor.execute("""
-                SELECT migration_number, migration_name, status, 
-                       applied_at, error_message 
-                FROM schema_migrations 
-                WHERE branch_name = %s 
-                ORDER BY migration_number ASC
-            """, (branch,))
-            
-            migrations = cursor.fetchall()
-
-            if not migrations:
-                click.echo(f"No migrations found for branch '{branch}'")
-                return True
-
-            # Display migration status
-            headers = ['Number', 'Name', 'Status', 'Applied At', 'Error']
-            table_data = [[
-                f"{m[0]:04d}",
-                m[1] or 'unnamed',
-                m[2],
-                m[3].strftime('%Y-%m-%d %H:%M:%S') if m[3] else 'N/A',
-                (m[4][:50] + '...') if m[4] and len(m[4]) > 50 else (m[4] or 'N/A')
-            ] for m in migrations]
-
-            click.echo(f"\nMigration Status for branch '{branch}':")
-            click.echo(tabulate(table_data, headers=headers, tablefmt='grid'))
+        if not migrations:
+            click.echo(f"No migrations found for branch '{branch}'")
             return True
 
-        except Error as e:
-            click.echo(f"Error getting migration status: {e}")
-            return False
-        finally:
-            if self.connection and self.connection.is_connected():
-                cursor.close()
-                self.connection.close()
+        # Display migration status
+        headers = ['Number', 'Name', 'Status', 'Applied At', 'Error']
+        table_data = [[
+            f"{m['migration_number']:04d}",
+            m['name'] or 'unnamed',
+            m['status'],
+            m['applied_at'] or 'N/A',
+            (m.get('error_message', '')[:50] + '...') if m.get('error_message') and len(m.get('error_message')) > 50 else (m.get('error_message') or 'N/A')
+        ] for m in migrations]
+
+        click.echo(f"\nMigration Status for branch '{branch}':")
+        click.echo(tabulate(table_data, headers=headers, tablefmt='grid'))
+        return True
 
     def _get_parent_branch_migration_number(self, branch):
         """Get the last migration number from parent branch when this branch was created."""
-        try:
-            parent_branch = self.config['branches'][branch].get('created_from')
-            if not parent_branch:
-                return 0
-
-            if not self.connect():
-                return 0
-
-            cursor = self.connection.cursor()
-            
-            # Use parent branch database
-            db_name = self.config['connection']['database']
-            if parent_branch != 'main':
-                db_name = f"{db_name}_{parent_branch}"
-            
-            cursor.execute(f"USE {db_name}")
-
-            # Get last successful migration before branch creation time
-            branch_created_at = datetime.fromisoformat(
-                self.config['branches'][branch]['created_at']
-            )
-            
-            cursor.execute("""
-                SELECT MAX(migration_number) 
-                FROM schema_migrations 
-                WHERE branch_name = %s 
-                AND status = 'applied' 
-                AND applied_at <= %s
-            """, (parent_branch, branch_created_at))
-            
-            result = cursor.fetchone()
-            return result[0] or 0
-
-        except Error as e:
-            click.echo(f"Error getting parent branch migration number: {e}")
+        parent_branch = self.config['branches'][branch].get('created_from')
+        if not parent_branch:
             return 0
-        finally:
-            if self.connection and self.connection.is_connected():
-                cursor.close()
-                self.connection.close()
-    
+
+        branch_created_at = datetime.fromisoformat(self.config['branches'][branch]['created_at'])
+        parent_migrations = self.migration_manager.migrations.get(parent_branch, [])
+
+        applied_migrations = [
+            m for m in parent_migrations
+            if m['status'] == 'applied' and datetime.fromisoformat(m['applied_at']) <= branch_created_at
+        ]
+
+        if not applied_migrations:
+            return 0
+
+        return max(m['migration_number'] for m in applied_migrations)
+
     def get_current_migration(self):
         """Get the number of the last applied migration in current branch."""
-        try:
-            if not self.connect():
-                return -1
+        branch = self.config['current_branch']
+        migrations = self.migration_manager.migrations.get(branch, [])
 
-            cursor = self.connection.cursor()
-            branch = self.config['current_branch']
-        
-            # Use branch-specific database
-            db_name = self.config['connection']['database']
-            if branch != 'main':
-                db_name = f"{db_name}_{branch}"
-        
-            cursor.execute(f"USE {db_name}")
-        
-            # Get the highest applied migration number
-            cursor.execute("""
-                SELECT MAX(migration_number)
-                FROM schema_migrations
-                WHERE branch_name = %s AND status = 'applied'
-            """, (branch,))
-        
-            result = cursor.fetchone()
-            return result[0] if result[0] is not None else -1
-
-        except Error as e:
-            click.echo(f"Error getting current migration: {e}")
+        applied_migrations = [m for m in migrations if m['status'] == 'applied']
+        if not applied_migrations:
             return -1
-        finally:
-            if self.connection and self.connection.is_connected():
-                cursor.close()
-                self.connection.close()
+
+        return max(m['migration_number'] for m in applied_migrations)
 
     def rollback_migration(self, migration_number):
         """Rollback a specific migration."""
         try:
-            if not self.connect():
-                return False
-
-            cursor = self.connection.cursor()
             branch = self.config['current_branch']
         
-            # Use branch-specific database
-            db_name = self.config['connection']['database']
-            if branch != 'main':
-                db_name = f"{db_name}_{branch}"
-        
-            cursor.execute(f"USE {db_name}")
-        
             # Check if migration exists and is applied
-            cursor.execute("""
-                SELECT status
-                FROM schema_migrations
-                WHERE migration_number = %s AND branch_name = %s
-            """, (migration_number, branch))
+            migration = next((m for m in self.migration_manager.migrations.get(branch, [])
+                            if m['migration_number'] == migration_number), None)
         
-            result = cursor.fetchone()
-            if not result or result[0] != 'applied':
+            if not migration or migration['status'] != 'applied':
                 click.echo(f"Migration {migration_number:04d} is not applied or doesn't exist")
                 return False
         
@@ -789,126 +770,130 @@ class DatabaseManager:
             if not migration_files:
                 return False
         
+            # Connect to the database
+            if not self.connect():
+                return False
+
+            cursor = self.connection.cursor()
+        
+            # Use branch-specific database
+            db_name = self.config['connection']['database']
+            if branch != 'main':
+                db_name = f"{db_name}_{branch}"
+        
+            cursor.execute(f"USE {db_name}")
+        
             cursor.execute("START TRANSACTION")
         
-            # Apply down migration
-            with open(migration_files['down'], 'r') as f:
-                sql = f.read()
-                if sql.strip():
-                    for statement in sql.split(';'):
-                        if statement.strip():
-                            cursor.execute(statement)
-        
-            # Update migration status
-            cursor.execute("""
-                UPDATE schema_migrations
-                SET status = 'rolled_back', 
-                    applied_at = NULL
-                WHERE migration_number = %s AND branch_name = %s
-            """, (migration_number, branch))
-        
-            cursor.execute("COMMIT")
-            click.echo(f"Successfully rolled back migration {migration_number:04d}")
-            return True
+            try:
+                executed_queries = []
+            
+                # Apply down migration
+                with open(migration_files['down'], 'r') as f:
+                    sql = f.read()
+                    if sql.strip():
+                        for statement in sql.split(';'):
+                            if statement.strip():
+                                cursor.execute(statement)
+                                executed_queries.append(statement.strip())
+            
+                # Update migration status in JSON
+                migration['status'] = 'rolled_back'
+                migration['applied_at'] = None
+                self.migration_manager._save_migrations()
+            
+                cursor.execute("COMMIT")
+                click.echo(f"Successfully rolled back migration {migration_number:04d}")
+                return True, executed_queries
 
-        except Error as e:
-            cursor.execute("ROLLBACK")
-            click.echo(f"Error rolling back migration: {e}")
+            except Error as e:
+                cursor.execute("ROLLBACK")
+                click.echo(f"Error rolling back migration: {e}")
+                return False, []
+
+        except Exception as e:
+            click.echo(f"Error during rollback process: {e}")
             return False
+
         finally:
             if self.connection and self.connection.is_connected():
                 cursor.close()
                 self.connection.close()
+
+    def migrate_up(self):
+        current_migration = self.get_current_migration()
+        next_migration = current_migration + 1
+        return self.apply_migration(next_migration)
+
+    def migrate_down(self):
+        current_migration = self.get_current_migration()
+        if current_migration > 0:
+            # We need to implement a rollback_migration method
+            return self.rollback_migration(current_migration)
+        else:
+            return False, []
 
     def _get_parent_branch_pending_migrations(self, branch):
         """
         Get pending migrations from source branch that need to be applied to current branch.
         This considers the branch ancestry and ensures proper migration ordering.
-    
+
         Args:
             branch (str): Source branch name to check migrations from
-    
+
         Returns:
             list: List of tuples (migration_number, migration_name) that need to be applied
         """
         try:
-            if not self.connect():
-                return []
-
-            cursor = self.connection.cursor()
-        
             # Get branch creation timestamps and parent information
             source_created_at = datetime.fromisoformat(self.config['branches'][branch]['created_at'])
             target_branch = self.config['current_branch']
             target_created_at = datetime.fromisoformat(self.config['branches'][target_branch]['created_at'])
-        
+
             # Determine common ancestor
             source_lineage = self._get_branch_lineage(branch)
             target_lineage = self._get_branch_lineage(target_branch)
-            common_ancestor = None
-        
-            for ancestor in source_lineage:
-                if ancestor in target_lineage:
-                    common_ancestor = ancestor
-                    break
-                
+            common_ancestor = next((ancestor for ancestor in source_lineage if ancestor in target_lineage), None)
+
             if not common_ancestor:
                 click.echo("No common ancestor found between branches")
                 return []
-            
+
             # Get migrations from source branch after common ancestor
-            source_db = (self.config['connection']['database'] if branch == 'main' 
-                        else f"{self.config['connection']['database']}_{branch}")
-            cursor.execute(f"USE {source_db}")
-        
+            source_migrations = self.migration_manager.migrations.get(branch, [])
+            common_ancestor_migrations = self.migration_manager.migrations.get(common_ancestor, [])
+
+            # Find the last applied migration in common ancestor before source branch creation
+            last_common_migration = max(
+                (m for m in common_ancestor_migrations if m['status'] == 'applied' and 
+                datetime.fromisoformat(m['applied_at']) <= source_created_at),
+                key=lambda x: x['migration_number'],
+                default=None
+            )
+
+            last_common_migration_number = last_common_migration['migration_number'] if last_common_migration else -1
+
             # Get all applied migrations from source branch after the common point
-            cursor.execute("""
-                SELECT m1.migration_number, m1.migration_name
-                FROM schema_migrations m1
-                WHERE m1.branch_name = %s 
-                AND m1.status = 'applied'
-                AND m1.migration_number > (
-                    SELECT COALESCE(MAX(migration_number), -1)
-                    FROM schema_migrations
-                    WHERE branch_name = %s
-                    AND status = 'applied'
-                    AND applied_at <= %s
-                )
-                ORDER BY m1.migration_number ASC
-            """, (branch, common_ancestor, source_created_at))
-        
-            source_migrations = cursor.fetchall()
-        
-            # Get target branch migrations
-            target_db = (self.config['connection']['database'] if target_branch == 'main' 
-                        else f"{self.config['connection']['database']}_{target_branch}")
-            cursor.execute(f"USE {target_db}")
-        
+            source_applied_migrations = [
+                (m['migration_number'], m['name']) for m in source_migrations
+                if m['status'] == 'applied' and m['migration_number'] > last_common_migration_number
+            ]
+
             # Get already applied migrations in target branch
-            cursor.execute("""
-                SELECT migration_number 
-                FROM schema_migrations 
-                WHERE branch_name = %s 
-                AND status = 'applied'
-            """, (target_branch,))
-        
-            applied_in_target = {row[0] for row in cursor.fetchall()}
-        
+            target_migrations = self.migration_manager.migrations.get(target_branch, [])
+            applied_in_target = {m['migration_number'] for m in target_migrations if m['status'] == 'applied'}
+
             # Filter out migrations that are already applied in target
             pending_migrations = [
-                (num, name) for num, name in source_migrations 
+                (num, name) for num, name in source_applied_migrations 
                 if num not in applied_in_target
             ]
-        
+
             return pending_migrations
 
-        except Error as e:
+        except Exception as e:
             click.echo(f"Error checking source branch migrations: {e}")
             return []
-        finally:
-            if self.connection and self.connection.is_connected():
-                cursor.close()
-                self.connection.close()
 
     def _get_branch_lineage(self, branch_name):
         """
@@ -1046,11 +1031,23 @@ def cli():
 def status():
     """Check the status of the database connection and current branch."""
     db_manager = DatabaseManager()
-    if db_manager.connect():
+    connection_status = db_manager.connect()
+    
+    if connection_status:
         click.echo("Database connection is active!")
         click.echo(f"Current branch: {db_manager.config['current_branch']}")
+        db_manager.history_manager.add_entry(
+            command='status',
+            details=f"Checked status. Connection active. Current branch: {db_manager.config['current_branch']}",
+            status='success'
+        )
     else:
         click.echo("Failed to connect to the database.")
+        db_manager.history_manager.add_entry(
+            command='status',
+            details="Checked status. Failed to connect to the database.",
+            status='failed'
+        )
 
 @cli.command()
 @click.option("--branch", prompt="Branch name", help="The name of the new branch to create.")
@@ -1125,31 +1122,43 @@ def drop_table(name):
 def migrate_up():
     """Apply the next pending migration."""
     db_manager = DatabaseManager()
-    if not db_manager.connect():
-        return
-
-    current_migration = db_manager.get_current_migration()
-    next_migration = current_migration + 1
-    if db_manager.apply_migration(next_migration):
-        click.echo(f"Migration {next_migration:04d} applied successfully.")
+    success, executed_queries = db_manager.migrate_up()
+    
+    if success:
+        queries_str = "\n".join(executed_queries)
+        db_manager.history_manager.add_entry(
+            command='migrate_up',
+            details=f"Applied next pending migration in branch '{db_manager.config['current_branch']}'",
+            status='success',
+            error=f"Executed queries:\n{queries_str}"
+        )
     else:
-        click.echo(f"Failed to apply migration {next_migration:04d}.")
+        db_manager.history_manager.add_entry(
+            command='migrate_up',
+            details=f"Failed to apply next pending migration in branch '{db_manager.config['current_branch']}'",
+            status='failed'
+        )
 
 @cli.command()
 def migrate_down():
     """Rollback the last applied migration."""
     db_manager = DatabaseManager()
-    if not db_manager.connect():
-        return
-
-    current_migration = db_manager.get_current_migration()
-    if current_migration > 0:
-        if db_manager.rollback_migration(current_migration):
-            click.echo(f"Migration {current_migration:04d} rolled back successfully.")
-        else:
-            click.echo(f"Failed to rollback migration {current_migration:04d}.")
+    success, executed_queries = db_manager.migrate_down()
+    
+    if success:
+        queries_str = "\n".join(executed_queries)
+        db_manager.history_manager.add_entry(
+            command='migrate_down',
+            details=f"Rolled back last applied migration in branch '{db_manager.config['current_branch']}'",
+            status='success',
+            error=f"Executed queries:\n{queries_str}"
+        )
     else:
-        click.echo("No migrations to roll back.")
+        db_manager.history_manager.add_entry(
+            command='migrate_down',
+            details=f"Failed to roll back last applied migration in branch '{db_manager.config['current_branch']}'",
+            status='failed'
+        )
 
 @cli.command()
 @click.option("--name", prompt="Migration name", help="Name of the migration")
@@ -1164,13 +1173,34 @@ def create_migration(name, description):
 def apply_migration(number):
     """Apply a specific or next pending migration."""
     db_manager = DatabaseManager()
-    db_manager.apply_migration(migration_number=number)
+    success, executed_queries = db_manager.apply_migration(migration_number=number)
+    
+    if success:
+        queries_str = "\n".join(executed_queries)
+        db_manager.history_manager.add_entry(
+            command='apply_migration',
+            details=f"Applied migration {number if number else 'next pending'} in branch '{db_manager.config['current_branch']}'",
+            status='success',
+            error=f"Executed queries:\n{queries_str}"
+        )
+    else:
+        db_manager.history_manager.add_entry(
+            command='apply_migration',
+            details=f"Failed to apply migration {number if number else 'next pending'} in branch '{db_manager.config['current_branch']}'",
+            status='failed'
+        )
 
 @cli.command()
 def migration_status():
     """Show status of all migrations in current branch."""
     db_manager = DatabaseManager()
-    db_manager.migration_status()
+    result = db_manager.migration_status()
+    
+    db_manager.history_manager.add_entry(
+        command='migration_status',
+        details=f"Checked migration status for branch '{db_manager.config['current_branch']}'",
+        status='success' if result else 'failed'
+    )
 
 @cli.command()
 @click.option("--source", prompt="Source branch name", help="The branch to merge from.")
@@ -1200,7 +1230,7 @@ def history(limit):
         click.echo("No history entries found.")
         return
 
-    headers = ['Timestamp', 'Status', 'Command', 'Details', 'Error']
+    headers = ['Timestamp', 'Status', 'Command', 'Details', 'Error/SQL Query']
     click.echo("\nCommand History:")
     click.echo(tabulate(history_entries, headers=headers, tablefmt='grid'))
 
