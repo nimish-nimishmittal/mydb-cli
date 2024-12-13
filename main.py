@@ -8,6 +8,7 @@ from datetime import datetime
 import shutil
 from typing import List
 from tabulate import tabulate
+import csv
 from history_manager import HistoryManager
 
 class MigrationManager:
@@ -924,62 +925,44 @@ class DatabaseManager:
             source_branch (str): Name of the branch to merge from
             target_branch (str): Name of the branch to merge into
         Returns:
-            bool: True if merge was successful, False otherwise
+            tuple: (bool, str) - (Success status, Message)
         """
         if source_branch not in self.config['branches']:
-            click.echo(f"Source branch '{source_branch}' does not exist!")
-            return False
+            return False, f"Source branch '{source_branch}' does not exist!"
         if target_branch not in self.config['branches']:
-            click.echo(f"Target branch '{target_branch}' does not exist!")
-            return False
+            return False, f"Target branch '{target_branch}' does not exist!"
         if source_branch == target_branch:
-            click.echo("Cannot merge a branch into itself!")
-            return False
+            return False, "Cannot merge a branch into itself!"
 
         try:
             if not self.connect():
-                click.echo("Failed to connect to the database.")
-                return False
+                return False, "Failed to connect to the database."
 
             cursor = self.connection.cursor()
 
-            # Use source branch database
             source_db = self.config['connection']['database']
             if source_branch != 'main':
                 source_db = f"{source_db}_{source_branch}"
 
-            # Use target branch database
             target_db = self.config['connection']['database']
             if target_branch != 'main':
                 target_db = f"{target_db}_{target_branch}"
 
-            # Switch to source database
             cursor.execute(f"USE `{source_db}`")
 
-            # Get all tables from the source branch
             cursor.execute("SHOW TABLES")
             tables = [table[0].decode('utf-8') if isinstance(table[0], bytearray) else table[0] for table in cursor.fetchall()]
-        
+    
             if not tables:
-                click.echo(f"No tables found in source branch '{source_branch}' to merge.")
-                return True
+                return True, f"No tables found in source branch '{source_branch}' to merge."
 
-            click.echo(f"Found {len(tables)} tables to merge: {tables}")
-
-            # Switch to target database
-            cursor.execute(f"USE `{target_db}`")
-
-            # Start merging tables
+            merged_tables = []
             for table in tables:
-                click.echo(f"Merging table '{table}'...")
-
-                # Ensure table exists in target; if not, create it
+                cursor.execute(f"USE `{target_db}`")
                 cursor.execute(f"SHOW TABLES LIKE '{table}'")
                 if not cursor.fetchone():
-                    # Table does not exist in target, copy schema from source
                     cursor.execute(f"CREATE TABLE `{target_db}`.`{table}` LIKE `{source_db}`.`{table}`")
                 else:
-                    # Align schemas: Add missing columns in the target table
                     cursor.execute(f"SHOW COLUMNS FROM `{source_db}`.`{table}`")
                     source_columns = {col[0]: col[1].decode('utf-8') if isinstance(col[1], bytearray) else col[1] for col in cursor.fetchall()}
                     cursor.execute(f"SHOW COLUMNS FROM `{target_db}`.`{table}`")
@@ -987,41 +970,170 @@ class DatabaseManager:
 
                     for col_name, col_type in source_columns.items():
                         if col_name not in target_columns:
-                            click.echo(f"Adding missing column '{col_name}' to '{table}' in target branch.")
                             cursor.execute(f"ALTER TABLE `{target_db}`.`{table}` ADD COLUMN `{col_name}` {col_type}")
 
-                    # Re-fetch columns to ensure consistency
-                    cursor.execute(f"SHOW COLUMNS FROM `{target_db}`.`{table}`")
-
-                # Fetch column names for the table
                 cursor.execute(f"SHOW COLUMNS FROM `{source_db}`.`{table}`")
                 columns = [col[0] for col in cursor.fetchall()]
                 columns_str = ", ".join([f"`{col}`" for col in columns])
-
-                # Construct ON DUPLICATE KEY UPDATE part
                 update_str = ", ".join([f"`{col}`=VALUES(`{col}`)" for col in columns])
 
-                # Merge data from source to target
                 merge_query = f"""
                     INSERT INTO `{target_db}`.`{table}` ({columns_str})
                     SELECT {columns_str} FROM `{source_db}`.`{table}`
                     ON DUPLICATE KEY UPDATE {update_str}
                 """
                 cursor.execute(merge_query)
+                merged_tables.append(table)
+
+            # Update migration history
+            source_migrations = self.migration_manager.migrations.get(source_branch, [])
+            target_migrations = self.migration_manager.migrations.get(target_branch, [])
+        
+            new_migrations = [m for m in source_migrations if m['migration_number'] > max([tm['migration_number'] for tm in target_migrations] + [0])]
+            target_migrations.extend(new_migrations)
+            self.migration_manager.migrations[target_branch] = sorted(target_migrations, key=lambda x: x['migration_number'])
+            self.migration_manager._save_migrations()
 
             self.connection.commit()
-            click.echo(f"Successfully merged contents of '{source_branch}' into '{target_branch}'")
-            return True
+            return True, f"Successfully merged contents of '{source_branch}' into '{target_branch}'. Merged tables: {', '.join(merged_tables)}"
 
         except Error as e:
-            click.echo(f"Error during merge: {e}")
             self.connection.rollback()
-            return False
+            return False, f"Error during merge: {str(e)}"
+        finally:
+            if self.connection and self.connection.is_connected():
+                cursor.close()
+                self.connection.close() 
+    
+    def export_data(self, table_name, file_path=None):
+        """
+        Export data from a specific table to a CSV file.
+        
+        Args:
+            table_name (str): Name of the table to export
+            file_path (str, optional): Path to save the CSV file. If not provided, a default path will be used.
+        
+        Returns:
+            tuple: (bool, str) - (Success status, Message or file path)
+        """
+        try:
+            if not self.connect():
+                return False, "Failed to connect to the database."
+
+            cursor = self.connection.cursor(dictionary=True)
+            branch = self.config['current_branch']
+            
+            db_name = self.config['connection']['database']
+            if branch != 'main':
+                db_name = f"{db_name}_{branch}"
+            
+            cursor.execute(f"USE `{db_name}`")
+            
+            # Check if table exists
+            cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
+            if not cursor.fetchone():
+                return False, f"Table '{table_name}' does not exist in branch '{branch}'."
+            
+            # Fetch all data from the table
+            cursor.execute(f"SELECT * FROM `{table_name}`")
+            rows = cursor.fetchall()
+            
+            if not rows:
+                return False, f"No data found in table '{table_name}'."
+            
+            # Generate file path if not provided
+            if not file_path:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                file_path = f"{db_name}_{table_name}_{timestamp}.csv"
+            
+            # Write data to CSV file
+            with open(file_path, 'w', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=rows[0].keys())
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(row)
+            
+            return True, file_path
+
+        except Exception as e:
+            return False, f"Error exporting data: {str(e)}"
         finally:
             if self.connection and self.connection.is_connected():
                 cursor.close()
                 self.connection.close()
 
+    def import_data(self, table_name, file_path, create_if_not_exists=False):
+        """
+        Import data from a CSV file into a specific table.
+    
+        Args:
+            table_name (str): Name of the table to import data into
+            file_path (str): Path of the CSV file to import
+            create_if_not_exists (bool): If True, create the table if it doesn't exist
+
+        Returns:
+            tuple: (bool, str) - (Success status, Message)
+        """
+        try:
+            if not os.path.exists(file_path):
+                return False, f"File not found: {file_path}"
+
+            if not self.connect():
+                return False, "Failed to connect to the database."
+
+            cursor = self.connection.cursor()
+            branch = self.config['current_branch']
+        
+            db_name = self.config['connection']['database']
+            if branch != 'main':
+                db_name = f"{db_name}_{branch}"
+        
+            cursor.execute(f"USE `{db_name}`")
+        
+            # Check if table exists
+            cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
+            table_exists = cursor.fetchone() is not None
+
+            if not table_exists:
+                if not create_if_not_exists:
+                    return False, f"Table '{table_name}' does not exist in branch '{branch}'."
+                else:
+                    # Create the table based on CSV structure
+                    with open(file_path, 'r') as csvfile:
+                        csv_reader = csv.reader(csvfile)
+                        headers = next(csv_reader)
+                        create_table_query = f"CREATE TABLE `{table_name}` ("
+                        create_table_query += ", ".join([f"`{header}` TEXT" for header in headers])
+                        create_table_query += ")"
+                        cursor.execute(create_table_query)
+                    self.connection.commit()
+                    print(f"Created new table '{table_name}' based on CSV structure.")
+
+            # Get table columns
+            cursor.execute(f"DESCRIBE `{table_name}`")
+            columns = [column[0] for column in cursor.fetchall()]
+        
+            # Read CSV file and insert data
+            with open(file_path, 'r') as csvfile:
+                csv_reader = csv.DictReader(csvfile)
+                for row in csv_reader:
+                    # Filter row to only include existing columns
+                    filtered_row = {k: v for k, v in row.items() if k in columns}
+                    placeholders = ', '.join(['%s'] * len(filtered_row))
+                    columns_str = ', '.join(f'`{col}`' for col in filtered_row.keys())
+                    sql = f"INSERT INTO `{table_name}` ({columns_str}) VALUES ({placeholders})"
+                    cursor.execute(sql, list(filtered_row.values()))
+        
+            self.connection.commit()
+            return True, f"Successfully imported data into table '{table_name}'."
+
+        except Exception as e:
+            self.connection.rollback()
+            return False, f"Error importing data: {str(e)}"
+        finally:
+            if self.connection and self.connection.is_connected():
+                cursor.close()
+                self.connection.close()
 @click.group()
 def cli():
     """mydb-cli: A tool to manage your MySQL database with branching functionality."""
@@ -1208,7 +1320,24 @@ def migration_status():
 def merge_branch(source, target):
     """Merge changes from source branch into target branch."""
     db_manager = DatabaseManager()
-    db_manager.merge_branch(source, target)
+    success, message = db_manager.merge_branch(source, target)
+    
+    if success:
+        db_manager.history_manager.add_entry(
+            command='merge_branch',
+            details=f"Merged branch '{source}' into '{target}'",
+            status='success',
+            error=message
+        )
+        click.echo(message)
+    else:
+        db_manager.history_manager.add_entry(
+            command='merge_branch',
+            details=f"Failed to merge branch '{source}' into '{target}'",
+            status='failed',
+            error=message
+        )
+        click.echo(f"Merge failed: {message}")
 
 @cli.command()
 def studio():
@@ -1233,6 +1362,55 @@ def history(limit):
     headers = ['Timestamp', 'Status', 'Command', 'Details', 'Error/SQL Query']
     click.echo("\nCommand History:")
     click.echo(tabulate(history_entries, headers=headers, tablefmt='grid'))
+
+@cli.command()
+@click.option("--table", prompt="Table name", help="Name of the table to export")
+@click.option("--file", help="Path to save the CSV file (optional)")
+def export_data(table, file):
+    """Export data from a table to a CSV file."""
+    db_manager = DatabaseManager()
+    success, result = db_manager.export_data(table, file)
+    
+    if success:
+        db_manager.history_manager.add_entry(
+            command='export_data',
+            details=f"Exported data from table '{table}' to file '{result}'",
+            status='success'
+        )
+        click.echo(f"Data exported successfully. File saved as: {result}")
+    else:
+        db_manager.history_manager.add_entry(
+            command='export_data',
+            details=f"Failed to export data from table '{table}'",
+            status='failed',
+            error=result
+        )
+        click.echo(f"Export failed: {result}")
+
+@cli.command()
+@click.option("--table", prompt="Table name", help="Name of the table to import data into")
+@click.option("--file", prompt="File path", type=click.Path(exists=True), help="Path of the CSV file to import")
+@click.option("--create", is_flag=True, help="Create the table if it doesn't exist")
+def import_data(table, file, create):
+    """Import data from a CSV file into a table."""
+    db_manager = DatabaseManager()
+    success, message = db_manager.import_data(table, file, create_if_not_exists=create)
+    
+    if success:
+        db_manager.history_manager.add_entry(
+            command='import_data',
+            details=f"Imported data into table '{table}' from file '{file}'" + (" (table created)" if create else ""),
+            status='success'
+        )
+        click.echo(message)
+    else:
+        db_manager.history_manager.add_entry(
+            command='import_data',
+            details=f"Failed to import data into table '{table}' from file '{file}'",
+            status='failed',
+            error=message
+        )
+        click.echo(f"Import failed: {message}")
 
 if __name__ == '__main__':
     cli()

@@ -218,6 +218,59 @@ def render_tables_page():
         except Exception as e:
             st.error(f"Error accessing tables: {str(e)}")
 
+    st.markdown("---")
+
+    # new section for export and import [work in progess, it has !major errors]
+    st.subheader("Export and Import Data")
+    col3, col4 = st.columns(2)
+
+    with col3:
+        st.write("Export Table Data")
+        export_table = st.selectbox("Select Table to Export", tables, key="export_table")
+        export_file_name = st.text_input("Export File Name (optional)", key="export_file_name")
+        
+        if st.button("Export Data"):
+            try:
+                success, result = st.session_state.db_manager.export_data(export_table, export_file_name)
+                if success:
+                    st.success(f"Data exported successfully. File saved as: {result}")
+                    st.download_button(
+                        label="Download Exported Data",
+                        data=open(result, "rb").read(),
+                        file_name=os.path.basename(result),
+                        mime="text/csv"
+                    )
+                else:
+                    st.error(f"Failed to export data: {result}")
+            except Exception as e:
+                st.error(f"Error during export: {str(e)}")
+
+    with col4:
+        st.write("Import Table Data")
+        import_table = st.selectbox("Select Table to Import Into", tables, key="import_table")
+        uploaded_file = st.file_uploader("Choose a CSV file to import", type="csv")
+        
+        if uploaded_file is not None and st.button("Import Data"):
+            try:
+                # Save the uploaded file temporarily
+                with open("temp_import.csv", "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                
+                success, message = st.session_state.db_manager.import_data(import_table, "temp_import.csv")
+                if success:
+                    st.success(message)
+                else:
+                    st.error(f"Failed to import data: {message}")
+                
+                # Clean up the temporary file
+                os.remove("temp_import.csv")
+            except Exception as e:
+                st.error(f"Error during import: {str(e)}")
+                if os.path.exists("temp_import.csv"):
+                    os.remove("temp_import.csv")
+
+    st.markdown("---")
+
 def render_migrations_page():
     st.title("Migration Management")
     
