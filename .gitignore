@@ -3,3 +3,4 @@ venv
 __pycache__
 migrations/*
 !migrations/.gitkeep
+.testtest.py

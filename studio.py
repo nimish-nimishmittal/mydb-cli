@@ -8,6 +8,7 @@ import json
 import os
 from google.generativeai import GenerativeModel
 import google.generativeai as genai
+import csv
 from typing import List, Dict
 
 def init_session_state():
@@ -23,13 +24,12 @@ def init_session_state():
 
 def render_sidebar():
     st.sidebar.title("MyDB Studio")
-    pages = ['Overview', 'Branches', 'Tables', 'Migrations', 'Ask Gemini']
+    pages = ['Overview', 'Branches', 'Tables', 'Migrations', 'History', 'Ask Gemini']
     st.session_state.current_page = st.sidebar.radio("Navigation", pages)
     
     # Always show current branch status
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Current Branch:** {st.session_state.db_manager.config['current_branch']}")
-
 def render_overview_page():
     st.title("Database Overview")
     
@@ -194,61 +194,118 @@ def render_tables_page():
     
     with col2:
         st.subheader("Describe Table")
-        cursor = st.session_state.db_manager.connection.cursor()
-        current_branch = st.session_state.db_manager.config['current_branch']
-        db_name = st.session_state.db_manager.config['connection']['database']
-        if current_branch != 'main':
-            db_name = f"{db_name}_{current_branch}"
-        
         try:
-            cursor.execute(f"USE {db_name}")
+            if not st.session_state.db_manager.connect():
+                st.error("Failed to connect to database")
+                return
+
+            cursor = st.session_state.db_manager.connection.cursor()
+            current_branch = st.session_state.db_manager.config['current_branch']
+            db_name = st.session_state.db_manager.config['connection']['database']
+            if current_branch != 'main':
+                db_name = f"{db_name}_{current_branch}"
+            
+            cursor.execute(f"USE `{db_name}`")
             cursor.execute("SHOW TABLES")
-            tables = [table[0] for table in cursor.fetchall()]
+            tables_raw = cursor.fetchall()
+            
+            # Process table names to handle bytearray
+            tables = []
+            for table_row in tables_raw:
+                table_name = table_row[0]
+                if isinstance(table_name, (bytes, bytearray)):
+                    table_name = table_name.decode('utf-8')
+                tables.append(table_name)
             
             if tables:
                 selected_table = st.selectbox("Select Table", tables)
                 if st.button("Describe"):
-                    result = st.session_state.db_manager.describe_table(selected_table)
-                    if result:
-                        st.write(result)
+                    cursor.execute(f"DESCRIBE `{selected_table}`")
+                    columns = cursor.fetchall()
+                    
+                    if columns:
+                        column_info = []
+                        for col in columns:
+                            column_info.append({
+                                'Field': col[0],
+                                'Type': col[1],
+                                'Null': col[2],
+                                'Key': col[3],
+                                'Default': col[4],
+                                'Extra': col[5]
+                            })
+                        st.write(pd.DataFrame(column_info))
                     else:
                         st.error("Failed to describe table")
             else:
                 st.info("No tables found in current branch")
         except Exception as e:
             st.error(f"Error accessing tables: {str(e)}")
+        finally:
+            if 'cursor' in locals() and cursor:
+                cursor.close()
 
     st.markdown("---")
-
-    # new section for export and import [work in progess, it has !major errors]
+    
+    # Export and Import section
     st.subheader("Export and Import Data")
     col3, col4 = st.columns(2)
 
     with col3:
         st.write("Export Table Data")
-        export_table = st.selectbox("Select Table to Export", tables, key="export_table")
-        export_file_name = st.text_input("Export File Name (optional)", key="export_file_name")
-        
-        if st.button("Export Data"):
-            try:
-                success, result = st.session_state.db_manager.export_data(export_table, export_file_name)
-                if success:
-                    st.success(f"Data exported successfully. File saved as: {result}")
-                    st.download_button(
-                        label="Download Exported Data",
-                        data=open(result, "rb").read(),
-                        file_name=os.path.basename(result),
-                        mime="text/csv"
-                    )
-                else:
-                    st.error(f"Failed to export data: {result}")
-            except Exception as e:
-                st.error(f"Error during export: {str(e)}")
+        if tables:
+            export_table = st.selectbox("Select Table to Export", tables, key="export_table")
+            export_file_name = st.text_input("Export File Name (optional)", key="export_file_name")
+            
+            if st.button("Export Data"):
+                try:
+                    if not st.session_state.db_manager.connect():
+                        st.error("Failed to connect to database")
+                        return
+
+                    cursor = st.session_state.db_manager.connection.cursor(dictionary=True)
+                    try:
+                        cursor.execute(f"USE `{db_name}`")
+                        # Ensure table name is properly decoded and quoted
+                        cursor.execute(f"SELECT * FROM `{export_table}`")
+                        rows = cursor.fetchall()
+                        
+                        if not rows:
+                            st.warning(f"No data found in table '{export_table}'")
+                            return
+                        
+                        # Generate file path if not provided
+                        if not export_file_name:
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            os.makedirs("exports", exist_ok=True)
+                            export_file_name = f"exports/{db_name}_{export_table}_{timestamp}.csv"
+                        
+                        # Write to CSV
+                        with open(export_file_name, 'w', newline='') as csvfile:
+                            writer = csv.DictWriter(csvfile, fieldnames=rows[0].keys())
+                            writer.writeheader()
+                            writer.writerows(rows)
+                        
+                        st.success(f"Data exported successfully")
+                        with open(export_file_name, "rb") as file:
+                            st.download_button(
+                                label="Download Exported Data",
+                                data=file.read(),
+                                file_name=os.path.basename(export_file_name),
+                                mime="text/csv"
+                            )
+                    finally:
+                        cursor.close()
+                except Exception as e:
+                    st.error(f"Error during export: {str(e)}")
+        else:
+            st.info("No tables available for export")
 
     with col4:
         st.write("Import Table Data")
-        import_table = st.selectbox("Select Table to Import Into", tables, key="import_table")
+        import_table = st.text_input("Table Name to Import Into (create if not exists)")
         uploaded_file = st.file_uploader("Choose a CSV file to import", type="csv")
+        create_if_not_exists = st.checkbox("Create table if it doesn't exist")
         
         if uploaded_file is not None and st.button("Import Data"):
             try:
@@ -256,7 +313,7 @@ def render_tables_page():
                 with open("temp_import.csv", "wb") as f:
                     f.write(uploaded_file.getbuffer())
                 
-                success, message = st.session_state.db_manager.import_data(import_table, "temp_import.csv")
+                success, message = st.session_state.db_manager.import_data(import_table, "temp_import.csv", create_if_not_exists)
                 if success:
                     st.success(message)
                 else:
@@ -268,8 +325,6 @@ def render_tables_page():
                 st.error(f"Error during import: {str(e)}")
                 if os.path.exists("temp_import.csv"):
                     os.remove("temp_import.csv")
-
-    st.markdown("---")
 
 def render_migrations_page():
     st.title("Migration Management")
@@ -350,14 +405,23 @@ def render_migrations_page():
 
     st.markdown("---")
     
-    # Migration Status
+   # Migration Status
     st.subheader("Migration Status")
     try:
-        status = st.session_state.db_manager.migration_status()
-        if status:
-            st.code(status, language="plain")
+        success, result, current_migration = st.session_state.db_manager.migration_status()
+        if success:
+            if isinstance(result, list):
+                columns = ["Number", "Name", "Status", "Applied At", "Error"]
+                df = pd.DataFrame(result, columns=columns)
+                st.table(df)
+                if current_migration:
+                    st.info(f"Current Migration State: {current_migration['migration_number']:04d} - {current_migration['name']}")
+                else:
+                    st.info("Current Migration State: No migrations applied yet")
+            else:
+                st.info(result)
         else:
-            st.info("No pending migrations found")
+            st.error(f"Error getting migration status: {result}")
     except Exception as e:
         st.error(f"Error getting migration status: {str(e)}")
 
@@ -597,6 +661,19 @@ def render_ask_gemini_page():
         else:
             st.error("Unable to fetch database schema. Please check your connection.")
 
+def render_history_page():
+    st.title("Command History")
+    
+    limit = st.number_input("Number of entries to show", min_value=1, value=10)
+    history_entries = st.session_state.db_manager.history_manager.get_history(limit)
+    
+    if not history_entries:
+        st.info("No history entries found.")
+    else:
+        columns = ["Timestamp", "Status", "Command", "Details", "Error/SQL Query"]
+        df = pd.DataFrame(history_entries, columns=columns)
+        st.table(df)
+
 def main():
     st.set_page_config(
         page_title="MyDB Studio",
@@ -615,6 +692,8 @@ def main():
         render_tables_page()
     elif st.session_state.current_page == 'Migrations':
         render_migrations_page()
+    elif st.session_state.current_page == 'History':
+        render_history_page()
     elif st.session_state.current_page == 'Ask Gemini':
         render_ask_gemini_page()
 
