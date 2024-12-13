@@ -381,44 +381,51 @@ class DatabaseManager:
                 cursor.close()
                 self.connection.close()
 
-    def describe_table(self, table_name: str):
+    def describe_table(self, table_name):
         """Show detailed information about a specific table"""
         try:
             if not self.connect():
-                return False
+                return None
 
             cursor = self.connection.cursor()
             current_branch = self.config['current_branch']
-            
-            if current_branch == 'main':
-                current_db = self.config['connection']['database']  # Use 'mydb'
-            else:
-                current_db = f"{self.config['connection']['database']}_{current_branch}"  # e.g., 'mydb_nimish'
-            
+        
+            # Get correct database name
+            db_name = self.config['connection']['database']
+            if current_branch != 'main':
+                db_name = f"{db_name}_{current_branch}"
+        
             # Switch to current database
-            cursor.execute(f"USE {current_db}")
+            cursor.execute(f"USE `{db_name}`")
         
             # Get table description
-            cursor.execute(f"DESCRIBE {table_name}")
+            cursor.execute(f"DESCRIBE `{table_name}`")
             columns = cursor.fetchall()
         
             if not columns:
-                click.echo(f"Table '{table_name}' not found in branch '{current_branch}'")
-                return False
+                return None
 
-            # Display table structure
-            column_info = [[col[0], col[1], col[2], col[3], col[4], col[5]] for col in columns]
-            headers = ['Field', 'Type', 'Null', 'Key', 'Default', 'Extra']
-            click.echo(f"\nStructure of table '{table_name}':")
-            click.echo(tabulate(column_info, headers=headers, tablefmt='grid'))
-            return True
+            # Format the results
+            column_info = []
+            for col in columns:
+                column_info.append({
+                    'Field': col[0],
+                    'Type': col[1],
+                    'Null': col[2],
+                    'Key': col[3],
+                    'Default': col[4],
+                    'Extra': col[5]
+                })
+
+            return pd.DataFrame(column_info)
 
         except Error as e:
-            click.echo(f"Error describing table: {e}")
-            return False
+            print(f"Error describing table: {e}")
+            return None
         finally:
-            if self.connection and self.connection.is_connected():
+            if 'cursor' in locals() and cursor:
                 cursor.close()
+            if self.connection and self.connection.is_connected():
                 self.connection.close()
 
     def drop_table(self, table_name: str):
@@ -701,27 +708,38 @@ class DatabaseManager:
         }
 
     def migration_status(self, branch_name=None):
-        """Get detailed migration status for a branch."""
-        branch = branch_name or self.config['current_branch']
-        migrations = self.migration_manager.migrations.get(branch, [])
+        """Get detailed migration status for a branch, including current state."""
+        try:
+            if not self.connect():
+                return False, "Failed to connect to the database.", None
 
-        if not migrations:
-            click.echo(f"No migrations found for branch '{branch}'")
-            return True
+            branch = branch_name or self.config['current_branch']
+            migrations = self.migration_manager.migrations.get(branch, [])
 
-        # Display migration status
-        headers = ['Number', 'Name', 'Status', 'Applied At', 'Error']
-        table_data = [[
-            f"{m['migration_number']:04d}",
-            m['name'] or 'unnamed',
-            m['status'],
-            m['applied_at'] or 'N/A',
-            (m.get('error_message', '')[:50] + '...') if m.get('error_message') and len(m.get('error_message')) > 50 else (m.get('error_message') or 'N/A')
-        ] for m in migrations]
+            if not migrations:
+                return True, f"No migrations found for branch '{branch}'", None
 
-        click.echo(f"\nMigration Status for branch '{branch}':")
-        click.echo(tabulate(table_data, headers=headers, tablefmt='grid'))
-        return True
+            # Get the current migration state
+            current_migration = max(
+                (m for m in migrations if m['status'] == 'applied'),
+                key=lambda x: x['migration_number'],
+                default=None
+            )
+
+            # Prepare migration data for tabulation
+            headers = ['Number', 'Name', 'Status', 'Applied At', 'Error']
+            table_data = [[
+                f"{m['migration_number']:04d}",
+                m['name'] or 'unnamed',
+                m['status'],
+                m['applied_at'] or 'N/A',
+                (m.get('error_message', '')[:50] + '...') if m.get('error_message') and len(m.get('error_message')) > 50 else (m.get('error_message') or 'N/A')
+            ] for m in migrations]
+
+            return True, table_data, current_migration
+
+        except Exception as e:
+            return False, f"Error getting migration status: {str(e)}", None
 
     def _get_parent_branch_migration_number(self, branch):
         """Get the last migration number from parent branch when this branch was created."""
@@ -1022,44 +1040,49 @@ class DatabaseManager:
 
             cursor = self.connection.cursor(dictionary=True)
             branch = self.config['current_branch']
-            
+        
+            # Get correct database name
             db_name = self.config['connection']['database']
             if branch != 'main':
                 db_name = f"{db_name}_{branch}"
-            
+        
             cursor.execute(f"USE `{db_name}`")
-            
+        
             # Check if table exists
-            cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
+            cursor.execute(f"SHOW TABLES LIKE %s", (table_name,))
             if not cursor.fetchone():
                 return False, f"Table '{table_name}' does not exist in branch '{branch}'."
-            
+        
             # Fetch all data from the table
             cursor.execute(f"SELECT * FROM `{table_name}`")
             rows = cursor.fetchall()
-            
+        
             if not rows:
                 return False, f"No data found in table '{table_name}'."
-            
+
             # Generate file path if not provided
             if not file_path:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_path = f"{db_name}_{table_name}_{timestamp}.csv"
+                file_path = f"exports/{db_name}_{table_name}_{timestamp}.csv"
             
+                # Ensure exports directory exists
+                os.makedirs("exports", exist_ok=True)
+        
             # Write data to CSV file
             with open(file_path, 'w', newline='') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=rows[0].keys())
                 writer.writeheader()
                 for row in rows:
                     writer.writerow(row)
-            
+        
             return True, file_path
 
         except Exception as e:
             return False, f"Error exporting data: {str(e)}"
         finally:
-            if self.connection and self.connection.is_connected():
+            if 'cursor' in locals() and cursor:
                 cursor.close()
+            if self.connection and self.connection.is_connected():
                 self.connection.close()
 
     def import_data(self, table_name, file_path, create_if_not_exists=False):
@@ -1306,13 +1329,34 @@ def apply_migration(number):
 def migration_status():
     """Show status of all migrations in current branch."""
     db_manager = DatabaseManager()
-    result = db_manager.migration_status()
+    success, result, current_migration = db_manager.migration_status()
     
-    db_manager.history_manager.add_entry(
-        command='migration_status',
-        details=f"Checked migration status for branch '{db_manager.config['current_branch']}'",
-        status='success' if result else 'failed'
-    )
+    if success:
+        if isinstance(result, str):
+            click.echo(result)
+        else:
+            headers = ['Number', 'Name', 'Status', 'Applied At', 'Error']
+            click.echo(f"\nMigration Status for branch '{db_manager.config['current_branch']}':")
+            click.echo(tabulate(result, headers=headers, tablefmt='grid'))
+            
+            if current_migration:
+                click.echo(f"\nCurrent Migration State: {current_migration['migration_number']:04d} - {current_migration['name']}")
+            else:
+                click.echo("\nCurrent Migration State: No migrations applied yet")
+        
+        db_manager.history_manager.add_entry(
+            command='migration_status',
+            details=f"Checked migration status for branch '{db_manager.config['current_branch']}'",
+            status='success'
+        )
+    else:
+        click.echo(f"Error: {result}")
+        db_manager.history_manager.add_entry(
+            command='migration_status',
+            details=f"Failed to check migration status for branch '{db_manager.config['current_branch']}'",
+            status='failed',
+            error=result
+        )
 
 @cli.command()
 @click.option("--source", prompt="Source branch name", help="The branch to merge from.")
@@ -1326,8 +1370,7 @@ def merge_branch(source, target):
         db_manager.history_manager.add_entry(
             command='merge_branch',
             details=f"Merged branch '{source}' into '{target}'",
-            status='success',
-            error=message
+            status='success'
         )
         click.echo(message)
     else:
