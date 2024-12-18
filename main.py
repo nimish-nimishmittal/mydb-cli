@@ -10,6 +10,10 @@ from typing import List
 from tabulate import tabulate
 import csv
 from history_manager import HistoryManager
+import pandas as pd
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 
 class MigrationManager:
     def __init__(self, config_path='.mydb/migrations.json'):
@@ -92,36 +96,45 @@ class DatabaseManager:
     def _load_config(self):
         """Load configuration from JSON file"""
         if not os.path.exists(self.config_path):
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            default_config = {
-                'current_branch': 'main',
-                'branches': {
-                    'main': {
-                        'created_at': datetime.now().isoformat(),
-                        'last_accessed': datetime.now().isoformat()
-                    }
-                },
-                'connection': {
-                    'user': 'root',
-                    'password': 'B#@w@+123',
-                    'host': 'localhost',
-                    'port': 3306,
-                    'database': 'mydb',
-                    'auth_plugin': 'mysql_native_password'  # Add this line
-                }
-            }
-            with open(self.config_path, 'w') as f:
-                json.dump(default_config, f, indent=4)
-            return default_config
-        
+            return self._create_default_config()
+    
         with open(self.config_path, 'r') as f:
             config = json.load(f)
-            # Ensure auth_plugin is set in existing configs
-            if 'auth_plugin' not in config['connection']:
-                config['connection']['auth_plugin'] = 'mysql_native_password'
-                with open(self.config_path, 'w') as f:
-                    json.dump(config, f, indent=4)
-            return config
+    
+        if not config or 'connection' not in config:
+            return self._create_default_config()
+    
+        # Ensure auth_plugin is set in existing configs
+        if 'auth_plugin' not in config['connection']:
+            config['connection']['auth_plugin'] = 'mysql_native_password'
+            with open(self.config_path, 'w') as f:
+                json.dump(config, f, indent=4)
+    
+        return config
+
+    def _create_default_config(self):
+        """Create and save a default configuration"""
+        default_config = {
+            'current_branch': 'main',
+            'branches': {
+                'main': {
+                    'created_at': datetime.now().isoformat(),
+                    'last_accessed': datetime.now().isoformat()
+                }
+            },
+            'connection': {
+                'user': 'root',
+                'password': 'B#@w@+123',
+                'host': 'localhost',
+                'port': 3306,
+                'database': 'mydb',
+                'auth_plugin': 'mysql_native_password'
+            }
+        }
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        with open(self.config_path, 'w') as f:
+            json.dump(default_config, f, indent=4)
+        return default_config
 
     def _save_config(self):
         """Save current configuration to JSON file"""
@@ -173,6 +186,8 @@ class DatabaseManager:
             
                 # Copy schema and data
                 for (table_name,) in tables:
+                    if isinstance(table_name, bytearray):
+                        table_name = table_name.decode('utf-8')
                     cursor.execute(f"CREATE TABLE {new_db_name}.{table_name} LIKE {current_db_name}.{table_name}")
                     cursor.execute(f"INSERT INTO {new_db_name}.{table_name} SELECT * FROM {current_db_name}.{table_name}")
 
@@ -602,49 +617,43 @@ class DatabaseManager:
 
     def apply_migration(self, migration_number=None, branch_name=None):
         try:
-            # Establish connection or reconnect if needed
             if not self.connect():
-                return False
+                return False, []
 
             cursor = self.connection.cursor()
             branch = branch_name or self.config['current_branch']
 
-            # Use branch-specific database
             db_name = self.config['connection']['database']
             if branch != 'main':
                 db_name = f"{db_name}_{branch}"
 
-            # Explicitly check and reconnect if needed
             if not self.connection.is_connected():
                 click.echo("Reconnecting to the database...")
                 self.connection.reconnect(attempts=3, delay=2)
-                cursor = self.connection.cursor()  # Create a new cursor after reconnect
+                cursor = self.connection.cursor()
 
             cursor.execute(f"USE {db_name}")
 
-            # Fetch the next pending migration if not specified
             if migration_number is None:
                 pending_migrations = [m for m in self.migration_manager.migrations.get(branch, [])
-                                    if m['status'] == 'pending']
+                                      if m['status'] == 'pending']
                 if not pending_migrations:
                     click.echo(f"No pending migrations for branch '{branch}'")
-                    return True
+                    return True, []
 
                 migration = pending_migrations[0]
                 migration_number = migration['migration_number']
                 migration_name = migration['name']
                 click.echo(f"Applying migration {migration_number:04d}_{migration_name}")
 
-            # Load migration files
             migration_files = self._get_migration_files(branch, migration_number)
             if not migration_files:
-                return False
+                return False, []
 
             cursor.execute("START TRANSACTION")
 
             executed_queries = []
-            
-            # Apply up migration
+        
             with open(migration_files['up'], 'r') as f:
                 sql = f.read()
                 if sql.strip():
@@ -653,7 +662,6 @@ class DatabaseManager:
                             cursor.execute(statement)
                             executed_queries.append(statement.strip())
 
-            # Update migration status in JSON
             for migration in self.migration_manager.migrations.get(branch, []):
                 if migration['migration_number'] == migration_number:
                     migration['status'] = 'applied'
@@ -668,7 +676,6 @@ class DatabaseManager:
 
         except Error as e:
             cursor.execute("ROLLBACK")
-            # Update migration status to failed in JSON
             for migration in self.migration_manager.migrations.get(branch, []):
                 if migration['migration_number'] == migration_number:
                     migration['status'] = 'failed'
@@ -1023,14 +1030,15 @@ class DatabaseManager:
                 cursor.close()
                 self.connection.close() 
     
-    def export_data(self, table_name, file_path=None):
+    def export_data(self, table_name, file_path=None, export_format='csv'):
         """
-        Export data from a specific table to a CSV file.
-        
+        Export data from a specific table to a CSV or PDF file.
+    
         Args:
             table_name (str): Name of the table to export
-            file_path (str, optional): Path to save the CSV file. If not provided, a default path will be used.
-        
+            file_path (str, optional): Path to save the exported file. If not provided, a default path will be used.
+            export_format (str): Format to export ('csv' or 'pdf'). Defaults to 'csv'.
+    
         Returns:
             tuple: (bool, str) - (Success status, Message or file path)
         """
@@ -1040,41 +1048,64 @@ class DatabaseManager:
 
             cursor = self.connection.cursor(dictionary=True)
             branch = self.config['current_branch']
-        
+    
             # Get correct database name
             db_name = self.config['connection']['database']
             if branch != 'main':
                 db_name = f"{db_name}_{branch}"
-        
+    
             cursor.execute(f"USE `{db_name}`")
-        
+    
             # Check if table exists
             cursor.execute(f"SHOW TABLES LIKE %s", (table_name,))
             if not cursor.fetchone():
                 return False, f"Table '{table_name}' does not exist in branch '{branch}'."
-        
+    
             # Fetch all data from the table
             cursor.execute(f"SELECT * FROM `{table_name}`")
             rows = cursor.fetchall()
-        
+    
             if not rows:
                 return False, f"No data found in table '{table_name}'."
 
             # Generate file path if not provided
             if not file_path:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_path = f"exports/{db_name}_{table_name}_{timestamp}.csv"
-            
+                file_path = f"exports/{db_name}_{table_name}_{timestamp}.{export_format}"
+        
                 # Ensure exports directory exists
                 os.makedirs("exports", exist_ok=True)
-        
-            # Write data to CSV file
-            with open(file_path, 'w', newline='') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=rows[0].keys())
-                writer.writeheader()
-                for row in rows:
-                    writer.writerow(row)
-        
+    
+            if export_format.lower() == 'csv':
+                # Export to CSV
+                df = pd.DataFrame(rows)
+                df.to_csv(file_path, index=False)
+            elif export_format.lower() == 'pdf':
+                # Export to PDF
+                pdf = SimpleDocTemplate(file_path, pagesize=letter)
+                table_data = [list(rows[0].keys())] + [list(row.values()) for row in rows]
+                table = Table(table_data)
+                style = TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 14),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                    ('FONTSIZE', (0, 1), (-1, -1), 12),
+                    ('TOPPADDING', (0, 1), (-1, -1), 6),
+                    ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ])
+                table.setStyle(style)
+                pdf.build([table])
+            else:
+                return False, f"Unsupported export format: {export_format}"
+    
             return True, file_path
 
         except Exception as e:
@@ -1157,9 +1188,10 @@ class DatabaseManager:
             if self.connection and self.connection.is_connected():
                 cursor.close()
                 self.connection.close()
+
 @click.group()
 def cli():
-    """mydb-cli: A tool to manage your MySQL database with branching functionality."""
+    """mydb-cli: A SQL Database Management tool with Git-like Precision!"""
     pass
 
 @cli.command()
@@ -1408,23 +1440,24 @@ def history(limit):
 
 @cli.command()
 @click.option("--table", prompt="Table name", help="Name of the table to export")
-@click.option("--file", help="Path to save the CSV file (optional)")
-def export_data(table, file):
-    """Export data from a table to a CSV file."""
+@click.option("--file", help="Path to save the exported file (optional)")
+@click.option("--format", type=click.Choice(['csv', 'pdf'], case_sensitive=False), default='csv', help="Export format (csv or pdf)")
+def export_data(table, file, format):
+    """Export data from a table to a CSV or PDF file."""
     db_manager = DatabaseManager()
-    success, result = db_manager.export_data(table, file)
+    success, result = db_manager.export_data(table, file, format)
     
     if success:
         db_manager.history_manager.add_entry(
             command='export_data',
-            details=f"Exported data from table '{table}' to file '{result}'",
+            details=f"Exported data from table '{table}' to {format.upper()} file '{result}'",
             status='success'
         )
         click.echo(f"Data exported successfully. File saved as: {result}")
     else:
         db_manager.history_manager.add_entry(
             command='export_data',
-            details=f"Failed to export data from table '{table}'",
+            details=f"Failed to export data from table '{table}' to {format.upper()} format",
             status='failed',
             error=result
         )
@@ -1454,6 +1487,41 @@ def import_data(table, file, create):
             error=message
         )
         click.echo(f"Import failed: {message}")
+    
+@cli.command()
+@click.option('--before', help='Clear history before this date (YYYY-MM-DD)')
+@click.confirmation_option(prompt='Are you sure you want to clear the history?')
+def clear_history(before):
+    """Clear command history."""
+    db_manager = DatabaseManager()
+    
+    before_date = None
+    if before:
+        try:
+            before_date = datetime.strptime(before, '%Y-%m-%d')
+        except ValueError:
+            click.echo("Invalid date format. Please use YYYY-MM-DD")
+            return
+
+    if db_manager.history_manager.clear_history(before_date):
+        message = "History cleared successfully"
+        if before_date:
+            message += f" (entries before {before})"
+        click.echo(message)
+    else:
+        click.echo("Failed to clear history")
+
+@cli.command()
+@click.option('--path', help='Custom backup file path')
+def backup_history(path):
+    """Backup command history to a file."""
+    db_manager = DatabaseManager()
+    
+    if db_manager.history_manager.backup_history(path):
+        click.echo("History backup created successfully")
+    else:
+        click.echo("Failed to create history backup")
+
 
 if __name__ == '__main__':
     cli()

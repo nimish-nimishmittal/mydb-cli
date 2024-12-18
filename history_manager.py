@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime
 from tabulate import tabulate
+from typing import List, Optional, Dict, Any
 
 class HistoryManager:
     def __init__(self, history_file='.mydb/history.json'):
@@ -58,3 +59,79 @@ class HistoryManager:
             ])
         
         return formatted_entries
+    
+    def clear_history(self, before_date: Optional[datetime] = None) -> bool:
+        """
+        Clear history entries.
+        
+        Args:
+            before_date (datetime, optional): If provided, only clear entries before this date
+        
+        Returns:
+            bool: True if operation was successful, False otherwise
+        """
+        try:
+            if before_date:
+                history = self._read_history()
+                filtered_history = [
+                    entry for entry in history 
+                    if datetime.fromisoformat(entry['timestamp']) >= before_date
+                ]
+                self._write_history(filtered_history)
+            else:
+                self._write_history([])
+            
+            # Add entry about clearing history
+            self.add_entry(
+                command='clear_history',
+                details=f"History cleared {'before ' + before_date.strftime('%Y-%m-%d') if before_date else 'completely'}",
+                status='success'
+            )
+            return True
+            
+        except Exception as e:
+            self.add_entry(
+                command='clear_history',
+                details='Failed to clear history',
+                status='failed',
+                error=str(e)
+            )
+            return False
+
+    def backup_history(self, backup_path: Optional[str] = None) -> bool:
+        """
+        Create a backup of the history file.
+        
+        Args:
+            backup_path (str, optional): Custom path for backup file
+                                       If not provided, uses timestamp-based name
+        
+        Returns:
+            bool: True if backup was successful, False otherwise
+        """
+        try:
+            if not backup_path:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup_path = f'.mydb/history_backup_{timestamp}.json'
+
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+            history = self._read_history()
+            
+            with open(backup_path, 'w') as f:
+                json.dump(history, f, indent=2)
+
+            self.add_entry(
+                command='backup_history',
+                details=f'History backed up to {backup_path}',
+                status='success'
+            )
+            return True
+
+        except Exception as e:
+            self.add_entry(
+                command='backup_history',
+                details='Failed to backup history',
+                status='failed',
+                error=str(e)
+            )
+            return False
