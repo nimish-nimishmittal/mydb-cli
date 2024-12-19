@@ -86,9 +86,9 @@ class MigrationManager:
 
 
 class DatabaseManager:
-    def __init__(self, config_path='.mydb/config.json'):
+    def __init__(self, config_path='.mydb/config.json', config=None):
         self.config_path = config_path
-        self.config = self._load_config()
+        self.config = config or self._load_config()
         self.connection = None
         self.history_manager = HistoryManager()
         self.migration_manager = MigrationManager()
@@ -149,6 +149,54 @@ class DatabaseManager:
         except Error as e:
             click.echo(f"Error connecting to database: {e}")
             return False
+
+    def see_databases(self):
+        """List all configured databases."""
+        databases = self.config.get('databases', {})
+        if not databases:
+            click.echo("No databases configured.")
+            return
+
+        headers = ['Name', 'Host', 'Database']
+        data = [[name, db['host'], db['database']] for name, db in databases.items()]
+        click.echo(tabulate(data, headers=headers, tablefmt='grid'))
+
+    def connect_database(self, name, host, user, password, database):
+        """Connect to a new database."""
+        new_config = {
+            'connection': {
+                'host': host,
+                'user': user,
+                'password': password,
+                'database': database,
+                'auth_plugin': 'mysql_native_password'
+            }
+        }
+
+        # Test the connection
+        temp_manager = DatabaseManager(config=new_config)
+        if temp_manager.connect():
+            # If connection successful, save the new database configuration
+            if 'databases' not in self.config:
+                self.config['databases'] = {}
+            self.config['databases'][name] = new_config['connection']
+            self._save_config()
+            click.echo(f"Successfully connected and saved database '{name}'.")
+        else:
+            click.echo("Failed to connect to the database. Configuration not saved.")
+
+    def reach_home(self):
+        """Connect back to the default mydb database."""
+        home_config = self.config['databases'].get('mydb')
+        if home_config:
+            self.config['connection'] = home_config
+            self._save_config()
+            if self.connect():
+                click.echo("Successfully connected back to mydb database.")
+            else:
+                click.echo("Failed to connect to mydb database.")
+        else:
+            click.echo("Default mydb database not configured.")
 
     def create_branch(self, branch_name):
         """Create a new branch from current branch"""
@@ -1522,6 +1570,28 @@ def backup_history(path):
     else:
         click.echo("Failed to create history backup")
 
+@cli.command()
+def see_databases():
+    """List all configured databases."""
+    db_manager = DatabaseManager()
+    db_manager.see_databases()
+
+@cli.command()
+@click.option("--name", prompt="Database name", help="Name for this database connection")
+@click.option("--host", prompt="Host", help="Database host")
+@click.option("--user", prompt="User", help="Database user")
+@click.option("--password", prompt="Password", hide_input=True, help="Database password")
+@click.option("--database", prompt="Database", help="Database name")
+def connect_database(name, host, user, password, database):
+    """Connect to a new database."""
+    db_manager = DatabaseManager()
+    db_manager.connect_database(name, host, user, password, database)
+
+@cli.command()
+def reach_home():
+    """Connect back to the default mydb database."""
+    db_manager = DatabaseManager()
+    db_manager.reach_home()
 
 if __name__ == '__main__':
     cli()
