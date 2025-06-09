@@ -123,8 +123,8 @@ class DatabaseManager:
                 }
             },
             'connection': {
-                'user': 'root',
-                'password': 'B#@w@+123',
+                'user': 'your_user',
+                'password': 'YOUR_PASSWORD_HERE',
                 'host': 'localhost',
                 'port': 3306,
                 'database': 'mydb',
@@ -134,6 +134,8 @@ class DatabaseManager:
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
         with open(self.config_path, 'w') as f:
             json.dump(default_config, f, indent=4)
+        click.echo(f"Default configuration created at {self.config_path}")
+        click.echo("Please edit this file to set your actual database credentials (user, password).")
         return default_config
 
     def _save_config(self):

@@ -4,7 +4,6 @@ MyDB is a powerful database management tool that provides Git-like branching fun
 
 📚 Related Documentation:
 - [MyDB Landing Page](landingREADME.md)
-- [MyDB Studio Documentation](studioREADME.md)
 
 ## Table of Contents
 - [Features](#features)
@@ -54,19 +53,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```bash
 pip install -e .
 ```
-
-4. Install required dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-5. Make the CLI tool accessible system-wide:
-```bash
-# Add to your .bashrc or .zshrc:
-export PATH="$PATH:/path/to/mydb-cli/bin"
-
-# On Windows, add the bin directory to your system PATH
-```
+   _Note: `requirements.txt` is a frozen list of dependencies generated from `setup.py` and can be used for specific deployment scenarios if needed, but direct installation via `setup.py` (using `pip install -e .`) is the primary method for setting up the development environment._
 
 ## Getting Started
 
