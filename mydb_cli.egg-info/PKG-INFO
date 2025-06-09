@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: mydb-cli
+Version: 0.1
+License-File: LICENSE
+Requires-Dist: click==8.1.7
+Requires-Dist: mysql-connector-python==8.0.33
+Requires-Dist: tabulate==0.9.0
+Requires-Dist: pandas==2.0.3
+Requires-Dist: reportlab==4.0.4
+Requires-Dist: streamlit==1.29.0
+Requires-Dist: plotly==5.18.0
+Requires-Dist: networkx==3.2.1
+Requires-Dist: google-generativeai==0.3.2
+Dynamic: license-file
+Dynamic: requires-dist

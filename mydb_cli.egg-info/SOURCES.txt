@@ -1,0 +1,10 @@
+LICENSE
+README.md
+history_manager.py
+setup.py
+mydb_cli.egg-info/PKG-INFO
+mydb_cli.egg-info/SOURCES.txt
+mydb_cli.egg-info/dependency_links.txt
+mydb_cli.egg-info/entry_points.txt
+mydb_cli.egg-info/requires.txt
+mydb_cli.egg-info/top_level.txt

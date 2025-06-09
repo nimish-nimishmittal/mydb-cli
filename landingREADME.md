@@ -45,9 +45,6 @@ One major challenge was managing database and table names returned as bytearrays
 
 Below are sample screenshots of the landing page.
 
-![Screenshot 1](image.png)
-![Screenshot 2](image-1.png)
-
 ---
 
 ## 🤔 Why `mydb-cli`?
